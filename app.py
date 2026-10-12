@@ -1,3 +1,4 @@
+import time
 import streamlit as st
 from pypdf import PdfReader
 from google import genai
@@ -48,18 +49,49 @@ def extract_file_text(upload, max_chars=350000):
     except Exception as exc:
         return f"[Could not extract text from {upload.name}: {exc}]"
 
-def call_gemini(prompt, images, key, model):
+def call_gemini(prompt, images, key, model, web_search=False):
     client = genai.Client(api_key=key)
     parts = [types.Part.from_text(text=prompt)]
     for image_file in images or []:
         parts.append(types.Part.from_bytes(data=image_file.getvalue(), mime_type=image_file.type or "image/jpeg"))
         parts.append(types.Part.from_text(text=f"Screenshot filename: {image_file.name}"))
-    response = client.models.generate_content(
-        model=model,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=6000),
-    )
-    return response.text or "The model returned no text. Try fewer or smaller screenshots."
+    config_args = {"temperature": 0.2, "max_output_tokens": 6000}
+    if web_search:
+        # Uses Gemini's Google Search grounding when available for this model/API key.
+        config_args["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    config = types.GenerateContentConfig(**config_args)
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[types.Content(role="user", parts=parts)],
+                config=config,
+            )
+            answer = response.text or "The model returned no text. Try fewer or smaller screenshots."
+            # Surface search-grounding citations when the API returns them.
+            if web_search and getattr(response, "candidates", None):
+                candidate = response.candidates[0]
+                metadata = getattr(candidate, "grounding_metadata", None)
+                chunks = getattr(metadata, "grounding_chunks", None) if metadata else None
+                links = []
+                for chunk in chunks or []:
+                    web = getattr(chunk, "web", None)
+                    uri = getattr(web, "uri", None) if web else None
+                    title = getattr(web, "title", None) if web else None
+                    if uri and uri not in [u for _, u in links]:
+                        links.append((title or uri, uri))
+                if links:
+                    answer += "\n\n### Web sources returned by Google Search grounding\n" + "\n".join(f"- [{title}]({uri})" for title, uri in links[:10])
+            return answer
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc).lower()
+            transient = any(token in error_text for token in ["503", "unavailable", "overloaded", "429", "resource_exhausted", "temporarily"])
+            if not transient or attempt == 2:
+                raise
+            time.sleep(2 ** (attempt + 1))
+    raise last_error
 
 guideline_text = extract_file_text(guidelines, 350000)
 example_text = extract_file_text(examples, 50000)
@@ -116,45 +148,53 @@ Be cautious: uncertainty is better than a confident guess."""
                 st.session_state["last_analysis"] = call_gemini(prompt, screenshots, api_key, model_name)
             st.success("Draft analysis generated. Verify all claims and references.")
         except Exception as exc:
-            st.error(f"AI request failed: {exc}")
+            st.error(f"AI request failed after retrying transient errors: {exc}")
     if st.session_state.get("last_analysis"):
         st.markdown("### AI analysis (draft)")
         st.markdown(st.session_state["last_analysis"])
         st.download_button("Download analysis (.md)", st.session_state["last_analysis"], file_name="telus_task_analysis.md", mime="text/markdown")
 
 with tab_research:
-    st.subheader("Research a result using evidence you provide")
-    st.info("This version does not automatically browse live websites. Paste the relevant source text you checked; the AI will not pretend to have opened a URL.")
+    st.subheader("Research a result using web search")
+    st.info("This uses Gemini's Google Search grounding where supported. It may not find every source, and a failed USPS lookup alone does not prove an address does not exist. Verify critical findings yourself.")
     r_name = st.text_input("Result name", key="research_name")
     r_address = st.text_input("Address shown in task", key="research_address")
     r_category = st.text_input("Displayed category", key="research_category")
     r_query = st.text_input("Original query", key="research_query")
-    r_url = st.text_input("Source URL(s) checked", key="research_urls")
-    r_evidence = st.text_area("Paste relevant source text / evidence", key="research_evidence", height=160)
+    r_locale = st.text_input("City / state / country", key="research_locale")
+    r_urls = st.text_area("Optional source URLs or sites to prioritize", key="research_urls", height=70)
+    r_evidence = st.text_area("Optional evidence or observations already collected", key="research_evidence", height=100)
     r_pin = st.text_area("Map / pin observations", key="research_pin")
-    if st.button("Evaluate this result", disabled=not (api_key and (r_name or r_address))):
-        prompt = f"""Act as a cautious research assistant for TELUS Maps Search Evaluation. Do not submit ratings.
-Official guideline text:
+    if st.button("Research and evaluate this result", disabled=not (api_key and (r_name or r_address or r_query))):
+        prompt = f"""Research a result for a human working on TELUS Digital Maps Search Evaluation. Do not submit ratings or interact with TryRating.
+
+The uploaded official guideline text below is the primary authority for rating criteria. Web search is for factual corroboration only and must not override the guidelines.
+
+OFFICIAL GUIDELINES:
 {guideline_text or '[No guidelines uploaded]'}
-Examples:
+
+EXAMPLES (illustrative only):
 {example_text or '[No examples uploaded]'}
+
 Result name: {r_name or '[not supplied]'}
 Address shown: {r_address or '[not supplied]'}
 Category: {r_category or '[not supplied]'}
 Original query: {r_query or '[not supplied]'}
-URLs supplied by user: {r_url or '[none]'}
-Source text actually supplied: {r_evidence or '[none]'}
+Locale: {r_locale or '[not supplied]'}
+Sites/URLs to prioritize: {r_urls or '[none specified]'}
+Evidence already supplied by user: {r_evidence or '[none]'}
 Map/pin observations supplied by user: {r_pin or '[none]'}
-Return an evidence table (claim, evidence, source, confidence), missing checks, tentative ratings only where justified, supported issue checkboxes, and a concise English comment. Cite exact guideline sections only if they appear above. Never claim you opened a URL or invent facts. If evidence is insufficient, say Cannot determine yet."""
+
+Use Google Search grounding to look for reliable sources, prioritizing official postal/address sources, official business/organization pages, and reputable map or local-government sources. Try reasonable spelling and address variants. Report what each source actually supports and include source URLs. Distinguish a source not finding an address from affirmative evidence that it does not exist. Never claim USPS confirms nonexistence unless a source explicitly supports that. Do not invent visits, results, citations, or source content. Explain conflicting evidence and confidence. Then return: (1) concise findings, (2) evidence table with claim/source/what it supports/confidence, (3) unresolved checks, (4) tentative relevance/name/address/pin ratings only if the uploaded guidelines and evidence justify them, (5) exact guideline sections only if present in the supplied text, and (6) a concise English draft comment. If evidence is insufficient, say Cannot determine yet."""
         try:
-            with st.spinner("Evaluating the supplied evidence…"):
-                st.session_state["last_research"] = call_gemini(prompt, [], api_key, model_name)
-            st.success("Draft evaluation generated.")
+            with st.spinner("Searching for supporting sources and evaluating the result…"):
+                st.session_state["last_research"] = call_gemini(prompt, [], api_key, model_name, web_search=True)
+            st.success("Research draft generated. Open the cited sources and verify them before using the ratings.")
         except Exception as exc:
-            st.error(f"AI request failed: {exc}")
+            st.error(f"Research request failed after retrying transient errors: {exc}")
     if st.session_state.get("last_research"):
         st.markdown(st.session_state["last_research"])
-        st.download_button("Download result analysis (.md)", st.session_state["last_research"], file_name="telus_result_analysis.md", mime="text/markdown")
+        st.download_button("Download research (.md)", st.session_state["last_research"], file_name="telus_result_research.md", mime="text/markdown")
 
 with tab_reference:
     st.subheader("Search uploaded guidelines")
@@ -180,4 +220,4 @@ with tab_reference:
             st.text(example_text[:12000])
 
 st.divider()
-st.caption("Prototype v0.2 • AI drafts only. No automatic TryRating interaction or submission. AI can be wrong; verify each decision against project instructions and real evidence.")
+st.caption("Prototype v0.3 • AI drafts only. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
