@@ -95,7 +95,7 @@ def call_gemini(prompt, images, key, model, web_search=False):
 
 guideline_text = extract_file_text(guidelines, 350000)
 example_text = extract_file_text(examples, 50000)
-tab_analyze, tab_research, tab_reference = st.tabs(["Analyze a task", "Research a result", "Search guidelines"])
+tab_analyze, tab_research, tab_feedback, tab_reference = st.tabs(["Analyze a task", "Research a result", "Review exam feedback", "Search guidelines"])
 
 with tab_analyze:
     st.subheader("Analyze task screenshots")
@@ -196,6 +196,62 @@ Use Google Search grounding to look for reliable sources, prioritizing official 
         st.markdown(st.session_state["last_research"])
         st.download_button("Download research (.md)", st.session_state["last_research"], file_name="telus_result_research.md", mime="text/markdown")
 
+with tab_feedback:
+    st.subheader("Targeted review from your exam feedback")
+    st.write("Use this area to prepare for a retake. The topics below are copied from the feedback you received; the app will not invent the contents of guideline sections that have not been uploaded.")
+    st.metric("Previous score", "70/100", help="The email states that 80/100 is required to pass.")
+    st.markdown("**Required score:** 80/100 • **Gap to passing:** 10 points")
+    st.markdown("### Topics named in the feedback")
+    feedback_topics = [
+        ("GL 10.7", "Category Queries", "Understand real-world result distribution; do not demote a result just because something closer exists. Consider significant distance increases and the appropriate demotions."),
+        ("GL 5.14", "Unexpected Results", "Review the “The Pruneyard” example and how an apparently unexpected result can still fit the intent."),
+        ("GL 10.6.2", "Chain Businesses", "Assess distance against real-world chain locations, not just the results returned. Verify the specific branch address on the official site."),
+        ("GL 9.2.1", "Research Resources", "Review the project's required resources and process for checking pin accuracy."),
+        ("GL 9.5.1", "Multiple-Rooftop Rating", "Review the multiple-rooftop example, including businesses such as a gas station with multiple rooftops at the same address.")
+    ]
+    for section, title, detail in feedback_topics:
+        with st.expander(f"{section} — {title}", expanded=False):
+            st.write(detail)
+    st.warning("The notes above summarize the email only. Upload the current official guidelines and verify the exact rule wording and examples before relying on any rating.")
+    practice_focus = st.multiselect(
+        "Choose topics for a practice set",
+        [f"{section} — {title}" for section, title, _ in feedback_topics],
+        default=[f"{section} — {title}" for section, title, _ in feedback_topics]
+    )
+    practice_count = st.slider("Number of practice questions", min_value=3, max_value=10, value=5)
+    if st.button("Generate grounded practice questions", disabled=not (api_key and guideline_text and practice_focus)):
+        practice_prompt = f"""You are a careful study coach for TELUS Digital Maps Search Evaluation. Generate a practice set, NOT actual or leaked exam questions.
+Use ONLY the uploaded official guideline text as the authority. The email feedback below identifies sections to study, but does not provide the full rules. If the uploaded text does not contain enough information for a selected section, explicitly say that and do not invent its contents.
+Selected focus areas: {practice_focus}
+Number of questions: {practice_count}
+Exam feedback summary:
+- GL 10.7 Category Queries: real-world distribution, distance and appropriate demotions.
+- GL 5.14 Unexpected Results: “The Pruneyard” example.
+- GL 10.6.2 Chain Businesses: real-world chain locations and branch verification.
+- GL 9.2.1 Research Resources: required research resources and pin accuracy process.
+- GL 9.5.1 Multiple-Rooftop Rating: multiple rooftops at one address.
+Official guideline text:
+{guideline_text}
+Examples uploaded by user (illustrative only):
+{example_text or '[No examples uploaded]'}
+Create {practice_count} multiple-choice questions, focused only on the selected areas. For each question:
+1. Present a realistic hypothetical scenario, not a claim about a real task.
+2. Give 4 answer options (A-D).
+3. State the correct answer and explain why using the actual guideline text.
+4. Cite the exact section/page only if that reference is present in the uploaded text.
+5. Explain briefly why the tempting alternatives are wrong, only where the guidelines support it.
+6. If a rule or example cannot be found in the uploaded material, label that question “Not enough source material” instead of guessing.
+Finish with a short checklist of common reasoning errors to avoid. Do not claim these questions predict the real exam."""
+        try:
+            with st.spinner("Creating practice questions from the uploaded guidelines…"):
+                st.session_state["practice_set"] = call_gemini(practice_prompt, [], api_key, model_name)
+            st.success("Practice set generated from the uploaded material. Check each explanation against the source.")
+        except Exception as exc:
+            st.error(f"Practice generation failed after retrying transient errors: {exc}")
+    if st.session_state.get("practice_set"):
+        st.markdown(st.session_state["practice_set"])
+        st.download_button("Download practice set (.md)", st.session_state["practice_set"], file_name="telus_practice_set.md", mime="text/markdown")
+
 with tab_reference:
     st.subheader("Search uploaded guidelines")
     term = st.text_input("Keyword or section number", placeholder="e.g. 10.7.9")
@@ -220,4 +276,4 @@ with tab_reference:
             st.text(example_text[:12000])
 
 st.divider()
-st.caption("Prototype v0.3 • AI drafts only. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
+st.caption("Prototype v0.4 • AI drafts only. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
