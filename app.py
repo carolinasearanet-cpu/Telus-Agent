@@ -32,7 +32,7 @@ with st.sidebar:
     examples = st.file_uploader("Examples PDF / TXT / CSV", type=["pdf", "txt", "csv"], key="examples")
     st.caption("Upload only materials you are permitted to share with an external AI service.")
 
-def extract_file_text(upload, max_chars=60000):
+def extract_file_text(upload, max_chars=350000):
     if upload is None:
         return ""
     try:
@@ -61,8 +61,8 @@ def call_gemini(prompt, images, key, model):
     )
     return response.text or "The model returned no text. Try fewer or smaller screenshots."
 
-guideline_text = extract_file_text(guidelines, 65000)
-example_text = extract_file_text(examples, 25000)
+guideline_text = extract_file_text(guidelines, 350000)
+example_text = extract_file_text(examples, 50000)
 tab_analyze, tab_research, tab_reference = st.tabs(["Analyze a task", "Research a result", "Search guidelines"])
 
 with tab_analyze:
@@ -74,6 +74,7 @@ with tab_analyze:
     user_location = st.text_input("User location / map context", placeholder="Only information provided in the task")
     screenshots = st.file_uploader("Task screenshots", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="task_screenshots")
     task_notes = st.text_area("Additional context", placeholder="Separate facts from assumptions.")
+    critical_rule_notes = st.text_area("Critical guideline rules / corrections to check", placeholder="Optional: paste the exact rule or correction that applies to this task, including section number.")
     if screenshots:
         with st.expander(f"Preview {len(screenshots)} screenshot(s)"):
             cols = st.columns(min(3, len(screenshots)))
@@ -90,6 +91,9 @@ Viewport status: {viewport}
 User location/map context: {user_location or '[not supplied]'}
 Extra notes: {task_notes or '[none]'}
 
+CRITICAL RULE NOTES PROVIDED BY USER (check these against the official guideline text; do not silently ignore):
+{critical_rule_notes or '[none supplied]'}
+
 UPLOADED OFFICIAL GUIDELINES (primary authority):
 {guideline_text or '[No guidelines PDF uploaded]'}
 
@@ -99,11 +103,13 @@ UPLOADED EXAMPLES (illustrative only; never override guidelines):
 Instructions:
 1. Transcribe visible query, result names, addresses, categories, map/pin clues and status labels. Mark unreadable information uncertain; never invent it.
 2. Analyze each visible result separately. Separate screenshot facts, guideline evidence, example hints and inference.
-3. Suggest relevance, name/category, address and pin ratings only when supported. Explain uncertainty and list missing checks.
-4. Mention issue checkboxes only if the uploaded guidelines support them.
-5. Cite exact guideline section/page references only when present in the extracted text. Never invent references or claim a website/map was checked unless its content was supplied.
-6. Draft a concise English comment only where justified; use placeholders for facts needing verification.
-7. End with a checklist for human verification before manual submission.
+3. Before rating, identify and compare all potentially applicable rules. Apply the most specific rule to the exact situation; do not default to a general rule when a specific exception applies.
+4. If a user-provided critical rule conflicts with a proposed rating, explicitly investigate the conflict against the official guideline text. If the full relevant section is not available, say so and do not guess.
+5. Suggest relevance, name/category, address and pin ratings only when supported. Explain uncertainty and list missing checks.
+6. Mention issue checkboxes only if the uploaded guidelines support them.
+7. Cite exact guideline section/page references only when present in the extracted text. Never invent references or claim a website/map was checked unless its content was supplied.
+8. Draft a concise English comment only where justified; use placeholders for facts needing verification.
+9. End with a checklist for human verification before manual submission.
 Be cautious: uncertainty is better than a confident guess."""
         try:
             with st.spinner("Analyzing screenshots and uploaded reference materials…"):
