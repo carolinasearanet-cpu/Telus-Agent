@@ -1,138 +1,177 @@
 import streamlit as st
-import pandas as pd
 from pypdf import PdfReader
+from google import genai
+from google.genai import types
 
-st.set_page_config(page_title="Maps Evaluation Assistant", page_icon="🗺️", layout="wide")
-st.title("Maps Search Evaluation Assistant")
-st.caption("Assistive tool for research, evidence tracking and draft ratings. It does not connect to or submit anything to TryRating.")
+st.set_page_config(page_title="TELUS Maps Evaluation Assistant", page_icon="🗺️", layout="wide")
+st.title("TELUS Maps Search Evaluation Assistant")
+st.caption("AI-assisted analysis only. This app does not log in to or submit anything to TryRating.")
 
 with st.sidebar:
+    st.header("AI configuration")
+    try:
+        secret_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        secret_key = ""
+    manual_key = st.text_input(
+        "Gemini API key (optional session fallback)",
+        type="password",
+        help="Prefer configuring GEMINI_API_KEY in Streamlit Settings > Secrets. Never put keys in GitHub."
+    )
+    api_key = secret_key or manual_key
+    model_name = st.selectbox("Model", ["gemini-2.5-flash", "gemini-2.5-flash-lite"], index=0)
+    if secret_key:
+        st.success("API key loaded from Streamlit Secrets.")
+    elif manual_key:
+        st.info("Using the key entered for this browser session.")
+    else:
+        st.warning("Add GEMINI_API_KEY in Streamlit Secrets to enable AI.")
+    st.divider()
     st.header("Reference materials")
     guidelines = st.file_uploader("Official guidelines PDF", type=["pdf"], key="guidelines")
-    examples = st.file_uploader("Correct examples (PDF/TXT/CSV)", type=["pdf", "txt", "csv"], key="examples")
-    st.info("Upload only materials you are permitted to use. Avoid credentials and confidential project data.")
+    examples = st.file_uploader("Examples PDF / TXT / CSV", type=["pdf", "txt", "csv"], key="examples")
+    st.caption("Upload only materials you are permitted to share with an external AI service.")
 
-def read_uploaded_text(file):
-    if not file:
+def extract_file_text(upload, max_chars=60000):
+    if upload is None:
         return ""
     try:
-        if file.name.lower().endswith(".pdf"):
-            reader = PdfReader(file)
-            return "\n\n".join(f"[Page {i+1}]\n{p.extract_text() or ''}" for i, p in enumerate(reader.pages))
-        return file.getvalue().decode("utf-8", errors="replace")[:100000]
-    except Exception as e:
-        return f"Could not read file: {e}"
+        if upload.name.lower().endswith(".pdf"):
+            reader = PdfReader(upload)
+            pages = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"[PDF page {i+1}]\n{text}")
+            return "\n\n".join(pages)[:max_chars]
+        return upload.getvalue().decode("utf-8", errors="replace")[:max_chars]
+    except Exception as exc:
+        return f"[Could not extract text from {upload.name}: {exc}]"
 
-guideline_text = read_uploaded_text(guidelines)
-example_text = read_uploaded_text(examples)
+def call_gemini(prompt, images, key, model):
+    client = genai.Client(api_key=key)
+    parts = [types.Part.from_text(text=prompt)]
+    for image_file in images or []:
+        parts.append(types.Part.from_bytes(data=image_file.getvalue(), mime_type=image_file.type or "image/jpeg"))
+        parts.append(types.Part.from_text(text=f"Screenshot filename: {image_file.name}"))
+    response = client.models.generate_content(
+        model=model,
+        contents=[types.Content(role="user", parts=parts)],
+        config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=6000),
+    )
+    return response.text or "The model returned no text. Try fewer or smaller screenshots."
 
-tab_task, tab_reference, tab_export = st.tabs(["Task workspace", "Guideline search", "Export"])
+guideline_text = extract_file_text(guidelines, 65000)
+example_text = extract_file_text(examples, 25000)
+tab_analyze, tab_research, tab_reference = st.tabs(["Analyze a task", "Research a result", "Search guidelines"])
 
-with tab_task:
-    st.subheader("Task context")
-    c1, c2 = st.columns(2)
-    with c1:
-        query = st.text_input("Search query", placeholder="e.g. lunch")
-        locale = st.text_input("Locale / country", placeholder="e.g. en_US / United States")
-        viewport = st.selectbox("Viewport status", ["Unknown", "Fresh", "Stale", "No viewport shown"])
-    with c2:
-        user_location = st.text_input("User location shown in task", placeholder="Coordinates or area, if provided")
-        notes = st.text_area("Other task context", placeholder="Record visible context; distinguish facts from assumptions.")
-        screenshots = st.file_uploader("Task screenshots", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+with tab_analyze:
+    st.subheader("Analyze task screenshots")
+    st.write("Upload screenshots and, if permitted, the official guidelines and examples. The AI prepares a draft; you remain responsible for every decision.")
+    query = st.text_input("Search query (if visible / known)", placeholder="Enter the query exactly as shown")
+    locale = st.text_input("Locale / country", placeholder="e.g. en_US / United States")
+    viewport = st.selectbox("Viewport status", ["Not sure", "Fresh", "Stale", "No viewport shown"])
+    user_location = st.text_input("User location / map context", placeholder="Only information provided in the task")
+    screenshots = st.file_uploader("Task screenshots", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="task_screenshots")
+    task_notes = st.text_area("Additional context", placeholder="Separate facts from assumptions.")
     if screenshots:
-        cols = st.columns(min(3, len(screenshots)))
-        for i, image in enumerate(screenshots):
-            with cols[i % len(cols)]:
-                st.image(image, caption=image.name, use_container_width=True)
+        with st.expander(f"Preview {len(screenshots)} screenshot(s)"):
+            cols = st.columns(min(3, len(screenshots)))
+            for i, image in enumerate(screenshots):
+                with cols[i % len(cols)]:
+                    st.image(image, caption=image.name, use_container_width=True)
+    if st.button("Analyze task with AI", type="primary", disabled=not (api_key and screenshots)):
+        prompt = f"""You are an evidence-first assistant for TELUS Digital Maps Search Evaluation. You are not the final evaluator and must not submit anything.
 
-    st.divider()
-    st.subheader("Evaluate results")
-    st.caption("Add each result separately. Treat ratings as drafts and confirm them against the official project instructions.")
-    if "results" not in st.session_state:
-        st.session_state.results = []
-    with st.form("result_form", clear_on_submit=True):
-        st.markdown("**New result**")
-        name = st.text_input("Result name")
-        address = st.text_input("Result address")
-        category = st.text_input("Displayed category")
-        result_url = st.text_input("Official or reliable source URL")
-        source_note = st.text_area("What does this source confirm?", placeholder="e.g. official website confirms name/address; menu confirms lunch service.")
-        a, b, c = st.columns(3)
-        with a:
-            navigational = st.selectbox("Navigational result?", ["No", "Yes"])
-            relevance = st.selectbox("Relevance", ["Not rated", "Navigational", "Excellent", "Good", "Acceptable", "Bad"])
-        with b:
-            relevance_issue = st.multiselect("Relevance issue (if applicable)", ["User Intent Issue", "Distance/Prominence Issue"])
-            name_accuracy = st.selectbox("Name accuracy", ["Not rated", "Correct", "Partially Correct", "Incorrect", "n/a"])
-        with c:
-            address_accuracy = st.selectbox("Address accuracy", ["Not rated", "Correct", "Incorrect", "Can't Verify", "n/a"])
-            pin_accuracy = st.selectbox("Pin accuracy", ["Not rated", "Perfect", "Approximate", "Wrong", "Can't Verify", "n/a"])
-        closed = st.selectbox("Business closed / does not exist?", ["Not determined", "No", "Yes"])
-        rationale = st.text_area("Reasoning / uncertainty", placeholder="Why does this rating follow from the guidelines and evidence?")
-        comment = st.text_area("Draft comment in English", placeholder="Concise explanation, guideline section(s), and source evidence.")
-        submitted = st.form_submit_button("Add result")
-        if submitted:
-            if not name.strip() and not address.strip():
-                st.error("Add at least a result name or address.")
-            else:
-                st.session_state.results.append({
-                    "query": query, "locale_country": locale, "viewport": viewport,
-                    "user_location": user_location, "task_notes": notes,
-                    "name": name, "address": address, "category": category,
-                    "source_url": result_url, "source_evidence": source_note,
-                    "navigational": navigational, "relevance": relevance,
-                    "relevance_issues": ", ".join(relevance_issue),
-                    "name_accuracy": name_accuracy, "address_accuracy": address_accuracy,
-                    "pin_accuracy": pin_accuracy, "closed_nonexistent": closed,
-                    "reasoning_uncertainty": rationale, "comment_en": comment
-                })
-                st.success(f"Added: {name or address}")
+TASK CONTEXT
+Query: {query or '[not supplied]'}
+Locale/country: {locale or '[not supplied]'}
+Viewport status: {viewport}
+User location/map context: {user_location or '[not supplied]'}
+Extra notes: {task_notes or '[none]'}
 
-    if st.session_state.results:
-        st.subheader(f"Current results ({len(st.session_state.results)})")
-        for idx, item in enumerate(st.session_state.results):
-            with st.expander(f"{idx+1}. {item['name'] or item['address']} — {item['relevance']}"):
-                st.write(f"**Address:** {item['address'] or 'Not entered'}")
-                st.write(f"**Source:** {item['source_url'] or 'Not entered'}")
-                st.write(f"**Evidence:** {item['source_evidence'] or 'Not entered'}")
-                st.write(f"**Relevance issues:** {item['relevance_issues'] or 'None selected'}")
-                st.write(f"**Comment:** {item['comment_en'] or 'Not drafted'}")
-                if st.button("Remove result", key=f"remove_{idx}"):
-                    st.session_state.results.pop(idx)
-                    st.rerun()
+UPLOADED OFFICIAL GUIDELINES (primary authority):
+{guideline_text or '[No guidelines PDF uploaded]'}
+
+UPLOADED EXAMPLES (illustrative only; never override guidelines):
+{example_text or '[No examples uploaded]'}
+
+Instructions:
+1. Transcribe visible query, result names, addresses, categories, map/pin clues and status labels. Mark unreadable information uncertain; never invent it.
+2. Analyze each visible result separately. Separate screenshot facts, guideline evidence, example hints and inference.
+3. Suggest relevance, name/category, address and pin ratings only when supported. Explain uncertainty and list missing checks.
+4. Mention issue checkboxes only if the uploaded guidelines support them.
+5. Cite exact guideline section/page references only when present in the extracted text. Never invent references or claim a website/map was checked unless its content was supplied.
+6. Draft a concise English comment only where justified; use placeholders for facts needing verification.
+7. End with a checklist for human verification before manual submission.
+Be cautious: uncertainty is better than a confident guess."""
+        try:
+            with st.spinner("Analyzing screenshots and uploaded reference materials…"):
+                st.session_state["last_analysis"] = call_gemini(prompt, screenshots, api_key, model_name)
+            st.success("Draft analysis generated. Verify all claims and references.")
+        except Exception as exc:
+            st.error(f"AI request failed: {exc}")
+    if st.session_state.get("last_analysis"):
+        st.markdown("### AI analysis (draft)")
+        st.markdown(st.session_state["last_analysis"])
+        st.download_button("Download analysis (.md)", st.session_state["last_analysis"], file_name="telus_task_analysis.md", mime="text/markdown")
+
+with tab_research:
+    st.subheader("Research a result using evidence you provide")
+    st.info("This version does not automatically browse live websites. Paste the relevant source text you checked; the AI will not pretend to have opened a URL.")
+    r_name = st.text_input("Result name", key="research_name")
+    r_address = st.text_input("Address shown in task", key="research_address")
+    r_category = st.text_input("Displayed category", key="research_category")
+    r_query = st.text_input("Original query", key="research_query")
+    r_url = st.text_input("Source URL(s) checked", key="research_urls")
+    r_evidence = st.text_area("Paste relevant source text / evidence", key="research_evidence", height=160)
+    r_pin = st.text_area("Map / pin observations", key="research_pin")
+    if st.button("Evaluate this result", disabled=not (api_key and (r_name or r_address))):
+        prompt = f"""Act as a cautious research assistant for TELUS Maps Search Evaluation. Do not submit ratings.
+Official guideline text:
+{guideline_text or '[No guidelines uploaded]'}
+Examples:
+{example_text or '[No examples uploaded]'}
+Result name: {r_name or '[not supplied]'}
+Address shown: {r_address or '[not supplied]'}
+Category: {r_category or '[not supplied]'}
+Original query: {r_query or '[not supplied]'}
+URLs supplied by user: {r_url or '[none]'}
+Source text actually supplied: {r_evidence or '[none]'}
+Map/pin observations supplied by user: {r_pin or '[none]'}
+Return an evidence table (claim, evidence, source, confidence), missing checks, tentative ratings only where justified, supported issue checkboxes, and a concise English comment. Cite exact guideline sections only if they appear above. Never claim you opened a URL or invent facts. If evidence is insufficient, say Cannot determine yet."""
+        try:
+            with st.spinner("Evaluating the supplied evidence…"):
+                st.session_state["last_research"] = call_gemini(prompt, [], api_key, model_name)
+            st.success("Draft evaluation generated.")
+        except Exception as exc:
+            st.error(f"AI request failed: {exc}")
+    if st.session_state.get("last_research"):
+        st.markdown(st.session_state["last_research"])
+        st.download_button("Download result analysis (.md)", st.session_state["last_research"], file_name="telus_result_analysis.md", mime="text/markdown")
 
 with tab_reference:
-    st.subheader("Search the uploaded guidelines")
-    st.write("Search extracted text from the official PDF. Verify exact section references in the original PDF.")
-    term = st.text_input("Keyword or section", placeholder="e.g. 10.7.9 Soft Categories")
+    st.subheader("Search uploaded guidelines")
+    term = st.text_input("Keyword or section number", placeholder="e.g. 10.7.9")
     if term:
         if not guideline_text:
             st.warning("Upload the official guidelines PDF in the sidebar first.")
         else:
             lower, needle, positions, start = guideline_text.lower(), term.lower(), [], 0
-            while len(positions) < 8:
+            while len(positions) < 10:
                 pos = lower.find(needle, start)
-                if pos < 0: break
+                if pos < 0:
+                    break
                 positions.append(pos)
                 start = pos + len(needle)
             if not positions:
                 st.info("No exact text match found. Try a shorter keyword.")
             for i, pos in enumerate(positions, 1):
                 st.markdown(f"**Match {i}**")
-                st.code(guideline_text[max(0, pos-500):min(len(guideline_text), pos+1100)], language=None)
+                st.code(guideline_text[max(0, pos-450):min(len(guideline_text), pos+1000)], language=None)
     if example_text:
         with st.expander("Preview extracted examples"):
             st.text(example_text[:12000])
 
-with tab_export:
-    st.subheader("Export draft evaluations")
-    if not st.session_state.results:
-        st.info("Add one or more results in Task workspace first.")
-    else:
-        df = pd.DataFrame(st.session_state.results)
-        st.dataframe(df, use_container_width=True)
-        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8-sig"), file_name="maps_evaluation_draft.csv", mime="text/csv")
-        st.download_button("Download JSON", df.to_json(orient="records", indent=2, force_ascii=False).encode("utf-8"), file_name="maps_evaluation_draft.json", mime="application/json")
-
 st.divider()
-st.caption("Version 0.1 • No automated browsing, no account login, no TryRating interaction, and no AI-generated rating decisions yet. Ratings and comments are manually entered and must be verified.")
+st.caption("Prototype v0.2 • AI drafts only. No automatic TryRating interaction or submission. AI can be wrong; verify each decision against project instructions and real evidence.")
