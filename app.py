@@ -19,7 +19,7 @@ with st.sidebar:
         help="Prefer configuring GEMINI_API_KEY in Streamlit Settings > Secrets. Never put keys in GitHub."
     )
     api_key = secret_key or manual_key
-    model_name = st.selectbox("Model", ["gemini-2.5-flash", "gemini-2.5-flash-lite"], index=0)
+    model_name = st.selectbox("Model", ["gemini-3.8-flash"], index=0)
     if secret_key:
         st.success("API key loaded from Streamlit Secrets.")
     elif manual_key:
