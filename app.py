@@ -107,6 +107,7 @@ with tab_analyze:
     screenshots = st.file_uploader("Task screenshots", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="task_screenshots")
     task_notes = st.text_area("Additional context", placeholder="Separate facts from assumptions.")
     critical_rule_notes = st.text_area("Critical guideline rules / corrections to check", placeholder="Optional: paste the exact rule or correction that applies to this task, including section number.")
+    research_during_analysis = st.checkbox("Use web research to verify businesses / addresses / nearby chain locations", value=True, help="Uses Gemini Google Search grounding if available. Always open and verify sources yourself.")
     if screenshots:
         with st.expander(f"Preview {len(screenshots)} screenshot(s)"):
             cols = st.columns(min(3, len(screenshots)))
@@ -132,20 +133,24 @@ UPLOADED OFFICIAL GUIDELINES (primary authority):
 UPLOADED EXAMPLES (illustrative only; never override guidelines):
 {example_text or '[No examples uploaded]'}
 
-Instructions:
-1. Transcribe visible query, result names, addresses, categories, map/pin clues and status labels. Mark unreadable information uncertain; never invent it.
-2. Analyze each visible result separately. Separate screenshot facts, guideline evidence, example hints and inference.
-3. Before rating, identify and compare all potentially applicable rules. Apply the most specific rule to the exact situation; do not default to a general rule when a specific exception applies.
-4. If a user-provided critical rule conflicts with a proposed rating, explicitly investigate the conflict against the official guideline text. If the full relevant section is not available, say so and do not guess.
-5. Suggest relevance, name/category, address and pin ratings only when supported. Explain uncertainty and list missing checks.
-6. Mention issue checkboxes only if the uploaded guidelines support them.
-7. Cite exact guideline section/page references only when present in the extracted text. Never invent references or claim a website/map was checked unless its content was supplied.
-8. Draft a concise English comment only where justified; use placeholders for facts needing verification.
-9. End with a checklist for human verification before manual submission.
-Be cautious: uncertainty is better than a confident guess."""
+MANDATORY ANALYSIS AND OUTPUT FORMAT — follow this structure for EVERY visible result:
+A. Extract the task facts: exact query, result, address, category, locale, viewport status, user location and any visible distance/rank clues. Mark unknown items as unknown.
+B. Relevance:
+   - Identify the query intent and location intent.
+   - State whether the user is inside or outside the Fresh Viewport (FVP), using only supplied coordinates/screenshots/context; if unclear, say cannot determine.
+   - Check every specific rule and exception that may apply (including category query, chain business, unexpected result, viewport, distance/prominence). Do not decide based only on the fact that another result appears closer.
+   - For chain businesses, research real-world branches near the relevant viewport/location when web search is enabled. Distinguish returned results from all real-world locations. List each closer branch and its source if found; do not claim a search was exhaustive.
+   - Give the proposed rating, exact applicable guideline section, the relevant rule in your own words, the facts that trigger the rule, and why the next higher/lower rating is or is not justified.
+C. Name/category accuracy: proposed rating; exact guideline section; rule; evidence; reasoning.
+D. Address accuracy: proposed rating; exact guideline section; rule; evidence; reasoning.
+E. Pin accuracy: proposed rating; exact guideline section; rule; evidence. Do not claim to have checked satellite/vector/Street View unless those views are actually visible or supplied. If not enough evidence, say so.
+F. Issue checkboxes: only those justified by the guidelines, with a short explanation.
+G. FINAL DRAFT COMMENT IN ENGLISH: Separate each rating into its own labeled clause/paragraph, e.g. [Relevance - rating - issue], [Name - rating], [Address - rating], [Pin - rating]. For EACH classification, explicitly cite its applicable guideline section number AND the relevant rule, then state the concrete evidence. For relevance, explain viewport and distance/chain research when applicable. Include research URLs only if actually returned by the web search and relevant. Do not cite one section as if it supports all four ratings. If an exact section is absent from the uploaded text, write "[section needs verification in official guidelines]" instead of inventing a citation.
+H. Confidence and unresolved checks: list missing evidence and what a human must verify before submitting.
+Never output a bare rating list without reasoning. Never fabricate guideline quotations, section numbers, URLs, addresses, nearby branches, or map checks. Uploaded official guidelines are the primary authority; examples are secondary. User-provided corrections must be explicitly reconciled with the source text. If web search is disabled or unavailable, state that real-world branch research was not performed."""
         try:
             with st.spinner("Analyzing screenshots and uploaded reference materials…"):
-                st.session_state["last_analysis"] = call_gemini(prompt, screenshots, api_key, model_name)
+                st.session_state["last_analysis"] = call_gemini(prompt, screenshots, api_key, model_name, web_search=research_during_analysis)
             st.success("Draft analysis generated. Verify all claims and references.")
         except Exception as exc:
             st.error(f"AI request failed after retrying transient errors: {exc}")
@@ -276,4 +281,4 @@ with tab_reference:
             st.text(example_text[:12000])
 
 st.divider()
-st.caption("Prototype v0.4 • AI drafts only. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
+st.caption("Prototype v0.5 • Per-rating guideline citations and optional grounded research. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
