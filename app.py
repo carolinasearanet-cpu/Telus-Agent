@@ -49,6 +49,41 @@ def extract_file_text(upload, max_chars=350000):
     except Exception as exc:
         return f"[Could not extract text from {upload.name}: {exc}]"
 
+def select_relevant_guidelines(full_text, focus_text="", max_chars=45000):
+    """Select relevant extracted PDF pages to reduce token/quota use without altering source text."""
+    if not full_text:
+        return "[No official guidelines uploaded]"
+    pages = full_text.split("\n\n[PDF page ")
+    if len(pages) <= 1:
+        return full_text[:max_chars]
+    terms = [
+        "relevance", "name accuracy", "address accuracy", "pin accuracy", "fresh viewport",
+        "viewport", "implicit location", "category quer", "chain business", "distance",
+        "prominence", "unexpected result", "pruneyard", "multiple-rooftop", "multiple rooftop",
+        "research resources", "address does not exist", "street view", "satellite", "vector"
+    ]
+    focus = (focus_text or "").lower()
+    ranked = []
+    for index, raw in enumerate(pages):
+        page = raw if raw.startswith("[PDF page ") else "[PDF page " + raw
+        lower = page.lower()
+        score = sum(3 for term in terms if term in lower and term in focus)
+        score += sum(1 for term in terms if term in lower)
+        if score:
+            ranked.append((score, index, page))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    chosen = []
+    used = 0
+    for _, _, page in ranked:
+        if used + len(page) <= max_chars:
+            chosen.append(page)
+            used += len(page)
+    if not chosen:
+        return full_text[:max_chars]
+    chosen.sort(key=lambda page: int(page.split("]", 1)[0].replace("[PDF page ", "") or "0"))
+    return "[SELECTED EXCERPTS FROM OFFICIAL GUIDELINES — not the full document; verify the relevant section before rating]\n\n" + "\n\n".join(chosen)
+
+
 def call_gemini(prompt, images, key, model, web_search=False):
     client = genai.Client(api_key=key)
     parts = [types.Part.from_text(text=prompt)]
@@ -87,14 +122,20 @@ def call_gemini(prompt, images, key, model, web_search=False):
         except Exception as exc:
             last_error = exc
             error_text = str(exc).lower()
-            transient = any(token in error_text for token in ["503", "unavailable", "overloaded", "429", "resource_exhausted", "temporarily"])
-            if not transient or attempt == 2:
+            is_503 = any(token in error_text for token in ["503", "unavailable", "overloaded", "temporarily"])
+            is_429 = "429" in error_text or "resource_exhausted" in error_text
+            retryable_429 = is_429 and any(token in error_text for token in ["retry in", "per minute", "requests per minute", "tokens per minute"])
+            if attempt == 2 or not (is_503 or retryable_429):
                 raise
             time.sleep(2 ** (attempt + 1))
     raise last_error
 
 guideline_text = extract_file_text(guidelines, 350000)
 example_text = extract_file_text(examples, 50000)
+# Keep the full text for local search; send smaller excerpts to Gemini.
+analysis_guidelines = select_relevant_guidelines(guideline_text, max_chars=45000)
+research_guidelines = select_relevant_guidelines(guideline_text, max_chars=30000)
+analysis_examples = example_text[:12000]
 tab_analyze, tab_research, tab_feedback, tab_reference = st.tabs(["Analyze a task", "Research a result", "Review exam feedback", "Search guidelines"])
 
 with tab_analyze:
@@ -226,7 +267,7 @@ with tab_feedback:
     practice_count = st.slider("Number of practice questions", min_value=3, max_value=10, value=5)
     if st.button("Generate grounded practice questions", disabled=not (api_key and guideline_text and practice_focus)):
         practice_prompt = f"""You are a careful study coach for TELUS Digital Maps Search Evaluation. Generate a practice set, NOT actual or leaked exam questions.
-Use ONLY the uploaded official guideline text as the authority. The email feedback below identifies sections to study, but does not provide the full rules. If the uploaded text does not contain enough information for a selected section, explicitly say that and do not invent its contents.
+Use ONLY the selected excerpts from the uploaded official guideline text as the authority. The email feedback below identifies sections to study, but does not provide the full rules. If the uploaded text does not contain enough information for a selected section, explicitly say that and do not invent its contents.
 Selected focus areas: {practice_focus}
 Number of questions: {practice_count}
 Exam feedback summary:
@@ -281,4 +322,4 @@ with tab_reference:
             st.text(example_text[:12000])
 
 st.divider()
-st.caption("Prototype v0.5 • Per-rating guideline citations and optional grounded research. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
+st.caption("Prototype v0.6 • Reduced prompt size, per-rating guideline citations and optional grounded research. Web research is grounded by Google Search where supported. No automatic TryRating interaction or submission. AI can be wrong; verify every decision against project instructions and real evidence.")
